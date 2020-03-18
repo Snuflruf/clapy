@@ -1,0 +1,561 @@
+# -*- coding: utf-8 -*-
+
+__author__ = "Guillaume GIALLONARDI"
+__credits__ = ["Guillaume GIALLONARDI"]
+__version__ = "0.1"
+__maintainer__ = "Guillaume GIALLONARDI"
+__status__ = "Develop"
+
+#Imports
+import re
+import argparse
+import getpass
+import subprocess
+
+class Clapi:
+        len_validation = {
+                "HOST": {
+                        "ADD" : 6,
+                        "DEL" : 1,
+                        "SETPARAM": 3
+                }
+        }
+
+        def __init__(self,cla_file,execute):
+                #self.login,self.password = self.ask_for_credentials()
+                self.login = "fry9e572"
+                self.password = "xPKqm05t"
+                self.cla_file = self.load_file(cla_file)
+                self.execute = execute
+                self.hints = []
+
+                #Getting all hosts in order to check duplicity
+                self.host_list = self.get_all_hosts()
+                self.host_tpl_list = self.get_all_hosttemplates()
+                self.host_group_list = self.get_all_hostgroups()
+                self.instance_list = self.get_all_instances()
+
+                self.process()
+
+        def ask_for_credentials(self):
+                """
+                Ask user his Centreon credentials
+                """
+
+                login = raw_input("Centreon login : ")
+                password = getpass.getpass("Centreon password : ")
+
+                return login,password
+
+        def load_file(self,path):
+                try:
+                        return open(path,"r")
+                except:
+                        return None
+
+        def parse_file(self):
+                sections = {}
+                ptr = None
+                for line in self.cla_file.readlines():
+                        line = line.replace("\n","")
+                        p = re.findall("^\[.+\]$",line)
+                        if p :
+                                ptr = p[0].replace("[","").replace("]","")
+                                if ptr not in sections:
+                                        sections[ptr] = []
+                        else:
+                                sections[ptr].append(line)
+                self.display_msg("OK","Parsing Clapi file")
+                self.display_msg("INFO",str(len(sections))+" section(s) found",1)
+
+                return sections
+
+        def process(self):
+                sections = self.parse_file()
+                cla_objects = ["COMMAND","HOSTGROUP","HOSTTEMPLATE","HOST"]
+                for obj in cla_objects:
+                        if obj in sections:
+                                self.display_msg("INFO","Entering "+obj+" section")
+                                for item in sections[obj]:
+                                        item = re.sub(r"#.*$","",item)
+                                        if len(item) > 0:
+                                                cobj = obj.lower().capitalize()
+                                                _class = globals()[cobj](self,item)
+
+
+        def get_all_hosts(self):
+                result = Host(self).show()
+                return result
+
+        def get_all_hostgroups(self):
+                result = Hostgroup(self).show()
+                return result
+
+        def get_all_hosttemplates(self):
+                result = Hosttemplate(self).show()
+                return result
+
+        def get_all_instances(self):
+                opts = "-a POLLERLIST"
+                rc, output = self.exec_command(opts,True)
+
+                result = []
+                if rc == True:
+                        self.display_msg("OK","Getting poller list")
+                        for line in output.splitlines():
+                                line = line.replace('\t',';')
+                                line = line.split(";")
+                                if len(line) != 2:
+                                        continue
+                                result.append(line[1])
+                else:
+                        self.display_msg("KO","Getting poller list")
+                        exit(1)
+
+                return result
+
+        def exec_command(self, options,force = False):
+                cmd = ["centreon","-u",self.login,"-p",self.password]
+
+                for opt in options.split(" "):
+                        cmd.append(opt)
+
+                if self.execute == True or force == True:
+                        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        output = process.communicate()[0]
+                        rc = process.returncode
+
+                        if rc == 0:
+                                return True,output
+                        else:
+                                return False,output
+
+                return None,None
+
+        def display_msg(self,type,message,level = 0):
+                idx = ""
+                for i in range(0,level):
+                        idx+='\t'
+                msg = idx+"["+type+"] "+message
+                print(msg)
+
+class Command:
+        def __init__(self,clapi,input=None):
+                self.clapi = clapi
+                self.object = "CMD"
+
+                if input is not None:
+                        self.process(input)
+
+        def process(self,input):
+                dispatch = {
+                        "ADD" : "add"
+                }
+
+                input_line = input.split(";")
+                if len(input_line) >1 :
+                        action = input_line.pop(0)
+                        getattr(self,dispatch[action])(";".join(input_line))
+                else:
+                        self.clapi.display_msg("KO","Not able to parse line: "+input,1)
+
+        def show(self):
+                opts = "-o "+self.object+" -a show"
+                rc, output = self.clapi.exec_command(opts,True)
+                result = []
+
+                if rc == True:
+                        self.clapi.display_msg("OK","Getting command list")
+                        for line in output.splitlines():
+                                if len(line) == 0:
+                                        continue
+                                result.append(line.split(";")[1])
+                else:
+                        self.clapi.display_msg("KO","Getting command list")
+                        exit(1)
+                return result
+
+        def add(self, input_line):
+                """
+                Add host group function
+                """
+                action = "ADD"
+
+                cnt_error = 0
+
+                template = [
+                        {"name":"Command name","empty":False,"unique" : True, "dependancy":False,"inventory": self.clapi.host_group_list},
+                        {"name":"Command type","empty":False,"unique" : False,"dependancy":False,"choice":["check","notif","misc","discovery"]},
+                        {"name":"Command line","empty":False,"unique" : False,"dependancy":False},
+                ]
+
+                inputs = []
+
+                datas = input_line.split(";")
+
+                if len(datas)<len(template):
+                        self.clapi.display_msg("KO","Missing field in line : '"+input_line+"'",2)
+                        cnt_error += 1
+                        return False
+
+                self.clapi.display_msg("+","Parsing line : '"+input_line+"'",1)
+                idx = -1
+                flag = False
+                for item in template:
+                        idx += 1
+                        data_i = datas[idx]
+                        for data in data_i.split('|'):
+                                if item["empty"] == False and len(data) == 0:
+                                        self.clapi.display_msg("KO",item["name"]+" is missing on line",2)
+                                        cnt_error += 1
+                                        flag = True
+
+                                if item["unique"] == True and data in item["inventory"]:
+                                        self.clapi.display_msg("KO",item["name"]+" '"+data+"' already exists",2)
+                                        cnt_error += 1
+                                        flag = True
+
+                                if item["dependancy"] == True and len(data) > 0 and data not in item["inventory"]:
+                                        self.clapi.display_msg("KO",item["name"]+" '"+data+"' does not exist",2)
+                                        cnt_error += 1
+                                        flag = True
+
+                                if "choice" in item and len(item["choice"]) > 0 and data not in item["choice"]:
+                                        self.clapi.display_msg("KO",item["name"]+" '"+data+"' must be "+" or ".join(item["choice"]),2)
+                                        cnt_error += 1
+                                        flag = True
+                if flag == False:
+                        self.clapi.display_msg("OK","Line successfully parsed",2)
+                        self.clapi.host_group_list.append(datas[0])
+                        opts = "-o "+self.object+" -a "+action+" -v "+input_line
+                        self.send_input(opts)
+
+        def send_input(self,opts):
+                rc, output = self.clapi.exec_command(opts)
+                if rc is not None:
+                        if rc == True:
+                                self.clapi.display_msg("OK","Input applyed on Centreon",2)
+                        else:
+                                self.clapi.display_msg("KO","Error while applying on Centreon : "+output,2)
+
+class Hostgroup:
+        def __init__(self,clapi,input = None):
+                self.clapi = clapi
+                self.object = "HG"
+
+                if input is not None:
+                        self.process(input)
+
+        def process(self,input):
+                dispatch = {
+                        "ADD" : "add"
+                }
+
+                input_line = input.split(";")
+                if len(input_line) >1 :
+                        action = input_line.pop(0)
+                        getattr(self,dispatch[action])(";".join(input_line))
+                else:
+                        self.clapi.display_msg("KO","Not able to parse line: "+input,1)
+
+        def show(self):
+                opts = "-o "+self.object+" -a show"
+                rc, output = self.clapi.exec_command(opts,True)
+                result = []
+
+                if rc == True:
+                        self.clapi.display_msg("OK","Getting host group list")
+                        for line in output.splitlines():
+                                if len(line) == 0:
+                                        continue
+                                result.append(line.split(";")[1])
+                else:
+                        self.clapi.display_msg("KO","Getting host group list")
+                        exit(1)
+
+                return result
+
+        def add(self, input_line):
+                """
+                Add host group function
+                """
+                action = "ADD"
+
+                cnt_error = 0
+
+                template = [
+                        {"name":"Host group name","empty":False,"unique" : True, "dependancy":False,"inventory": self.clapi.host_group_list},
+                        {"name":"Host group alias","empty":False,"unique" : False,"dependancy":False},
+                ]
+
+                inputs = []
+
+                datas = input_line.split(";")
+
+                if len(datas)<len(template):
+                        self.clapi.display_msg("KO","Missing field in line : '"+input_line+"'",2)
+                        cnt_error += 1
+                        return False
+
+                self.clapi.display_msg("+","Parsing line : '"+input_line+"'",1)
+                idx = -1
+                flag = False
+                for item in template:
+                        idx += 1
+                        data_i = datas[idx]
+                        for data in data_i.split('|'):
+                                if item["empty"] == False and len(data) == 0:
+                                        self.clapi.display_msg("KO",item["name"]+" is missing on line",2)
+                                        cnt_error += 1
+                                        flag = True
+
+                                if item["unique"] == True and data in item["inventory"]:
+                                        self.clapi.display_msg("KO",item["name"]+" '"+data+"' already exists",2)
+                                        cnt_error += 1
+                                        flag = True
+
+                                if item["dependancy"] == True and len(data) > 0 and data not in item["inventory"]:
+                                        self.clapi.display_msg("KO",item["name"]+" '"+data+"' does not exist",2)
+                                        cnt_error += 1
+                                        flag = True
+                if flag == False:
+                        self.clapi.display_msg("OK","Line successfully parsed",2)
+                        self.clapi.host_group_list.append(datas[0])
+                        opts = "-o "+self.object+" -a "+action+" -v "+input_line
+                        self.send_input(opts)
+
+        def send_input(self,opts):
+                rc, output = self.clapi.exec_command(opts)
+                if rc is not None:
+                        if rc == True:
+                                self.clapi.display_msg("OK","Input applyed on Centreon",2)
+                        else:
+                                self.clapi.display_msg("KO","Error while applying on Centreon : "+output,2)
+class Hosttemplate:
+        def __init__(self,clapi,input = None):
+                self.clapi = clapi
+                self.object = "HTPL"
+
+                if input is not None:
+                        self.process(input)
+
+        def process(self,input):
+                dispatch = {
+                        "ADD" : "add"
+                }
+
+                input_line = input.split(";")
+                if len(input_line) >1 :
+                        action = input_line.pop(0)
+                        getattr(self,dispatch[action])(";".join(input_line))
+                else:
+                        self.clapi.display_msg("KO","Not able to parse line: "+input,1)
+
+        def show(self):
+                opts = "-o "+self.object+" -a show"
+                rc, output = self.clapi.exec_command(opts,True)
+                result = []
+
+                if rc == True:
+                        self.clapi.display_msg("OK","Getting host template list")
+                        for line in output.splitlines():
+                                if len(line) == 0:
+                                        continue
+                                result.append(line.split(";")[1])
+                else:
+                        self.clapi.display_msg("KO","Getting host template list")
+                        exit(1)
+
+                return result
+
+        def add(self, input_line):
+                """
+                Add host template function
+                """
+                cnt_error = 0
+
+                template = [
+                        {"name":"Host template name","empty":False,"unique" : True, "dependancy":False,"inventory": self.clapi.host_tpl_list},
+                        {"name":"Host template alias","empty":False,"unique" : False,"dependancy":False},
+                        {"name":"Host template Ip address","empty":True,"unique" : False,"dependancy":False},
+                        {"name":"Host template parent","empty":True,"unique" : False, "dependancy":True, "inventory": self.clapi.host_tpl_list},
+                ]
+
+                action = "ADD"
+
+                inputs = []
+
+                datas = input_line.split(";")
+
+                if len(datas)<len(template):
+                        self.clapi.display_msg("KO","Missing field in line : '"+input_line+"'",2)
+                        cnt_error += 1
+                        return False
+
+                self.clapi.display_msg("+","Parsing line : '"+input_line+"'",1)
+                idx = -1
+                flag = False
+                for item in template:
+                        idx += 1
+                        data_i = datas[idx]
+                        for data in data_i.split('|'):
+                                if item["empty"] == False and len(data) == 0:
+                                        self.clapi.display_msg("KO",item["name"]+" is missing on line",2)
+                                        cnt_error += 1
+                                        flag = True
+
+                                if item["unique"] == True and data in item["inventory"]:
+                                        self.clapi.display_msg("KO",item["name"]+" '"+data+"' already exists",2)
+                                        cnt_error += 1
+                                        flag = True
+
+                                if item["dependancy"] == True and len(data) > 0 and data not in item["inventory"]:
+                                        self.clapi.display_msg("KO",item["name"]+" '"+data+"' does not exist",2)
+                                        cnt_error += 1
+                                        flag = True
+
+                if flag == False:
+                        self.clapi.display_msg("OK","Line successfully parsed",2)
+                        self.clapi.host_tpl_list.append(datas[0])
+                        input_line += ";;"
+                        opts = "-o "+self.object+" -a "+action+" -v "+input_line
+                        self.send_input(opts)
+
+        def send_input(self,opts):
+                rc, output = self.clapi.exec_command(opts)
+                if rc is not None:
+                        if rc == True:
+                                self.clapi.display_msg("OK","Input applyed on Centreon",2)
+                        else:
+                                self.clapi.display_msg("KO","Error while applying on Centreon : "+output,2)
+class Host:
+
+        def __init__(self,clapi,input=None):
+                self.clapi = clapi
+                self.object = "HOST"
+
+                if input is not None:
+                        self.process(input)
+
+        def process(self,input):
+                dispatch = {
+                        "ADD" : "add"
+                }
+
+                input_line = input.split(";")
+                if len(input_line) >1 :
+                        action = input_line.pop(0)
+                        getattr(self,dispatch[action])(";".join(input_line))
+                else:
+                        self.clapi.display_msg("KO","Not able to parse line: "+input,1)
+
+        def show(self):
+                opts = "-o "+self.object+" -a show"
+                rc, output = self.clapi.exec_command(opts,True)
+                result = []
+
+                if rc == True:
+                        self.clapi.display_msg("OK","Getting host list")
+                        for line in output.splitlines():
+                                if len(line) == 0:
+                                        continue
+                                result.append(line.split(";")[1])
+                else:
+                        self.clapi.display_msg("KO","Getting hosts list")
+                        exit(1)
+
+                return result
+
+
+        def add(self, input_line):
+                """
+                Add host function
+                """
+                cnt_error = 0
+
+                template = [
+                        {"name":"Host name","empty":False,"unique" : True, "dependancy":False,"inventory": self.clapi.host_list},
+                        {"name":"Host alias","empty":False,"unique" : False,"dependancy":False},
+                        {"name":"Host IP address","empty":False,"unique" : False, "dependancy":False},
+                        {"name":"Host template(s)","empty":True,"unique" : False, "dependancy":True, "inventory": self.clapi.host_tpl_list},
+                        {"name":"Instance name","empty":False,"unique" : False, "dependancy":True, "inventory": self.clapi.instance_list},
+                        {"name":"Hostgroup(s)","empty":True,"unique" : False, "dependancy":True, "inventory": self.clapi.host_group_list}
+                ]
+
+                action = "ADD"
+
+                inputs = []
+
+                datas = input_line.split(";")
+
+                if len(datas)<len(template):
+                        self.clapi.display_msg("KO","Missing field in line : '"+input_line+"'",2)
+                        cnt_error += 1
+                        return False
+
+                self.clapi.display_msg("+","Parsing line : '"+input_line+"'",1)
+                idx = -1
+                flag = False
+                for item in template:
+                        idx += 1
+                        data_i = datas[idx]
+                        for data in data_i.split('|'):
+                                if item["empty"] == False and len(data) == 0:
+                                        self.clapi.display_msg("KO",item["name"]+" is missing on line",2)
+                                        cnt_error += 1
+                                        flag = True
+
+                                if item["unique"] == True and data in item["inventory"]:
+                                        self.clapi.display_msg("KO",item["name"]+" '"+data+"' already exists",2)
+                                        cnt_error += 1
+                                        flag = True
+
+                                if item["dependancy"] == True and len(data) > 0 and data not in item["inventory"]:
+                                        self.clapi.display_msg("KO",item["name"]+" '"+data+"' does not exist",2)
+                                        cnt_error += 1
+                                        flag = True
+
+                if flag == False:
+                        self.clapi.display_msg("OK","Line successfully parsed",2)
+                        opts = "-o "+self.object+" -a "+action+" -v "+input_line
+                        self.clapi.execute
+                        self.send_input(opts)
+
+        def send_input(self,opts):
+                rc, output = self.clapi.exec_command(opts)
+                if rc is not None:
+                        if rc == True:
+                                self.clapi.display_msg("OK","Input applyed on Centreon",2)
+ else:
+                                self.clapi.display_msg("KO","Error while applying on Centreon : "+output,2)
+
+def is_usage_validate():
+        """
+        Getting and parsing the script parameters
+        """
+
+        try:
+                ap = argparse.ArgumentParser()
+
+                ap.add_argument("-i", "--clapi-file", required=False,
+                   help="Input formated CLAPI file")
+                ap.add_argument("-x", "--execute", required=False,action="store_true",
+                   help="Execute command on Clapi file inputs")
+
+                args = vars(ap.parse_args())
+
+                return True,args
+        except:
+                return False, None
+
+def main():
+        rc, args = is_usage_validate()
+
+        if rc:
+                clapi = Clapi(args["clapi_file"],args["execute"])
+        else:
+                exit(1)
+
+if __name__ == "__main__":
+        main()
+        exit(0)              
