@@ -2,7 +2,7 @@
 
 __author__ = "Guillaume GIALLONARDI"
 __credits__ = ["Guillaume GIALLONARDI"]
-__version__ = "0.1"
+__version__ = "0.0.1"
 __maintainer__ = "Guillaume GIALLONARDI"
 __status__ = "Develop"
 
