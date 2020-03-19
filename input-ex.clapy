@@ -1,0 +1,15 @@
+[HOSTTEMPLATE]
+ADD;HT_NAME;HT_ALIAS;;
+
+[HOST]
+#MY_HOST_NAME;MY_HOST_ALIAS;192.168.10.90;HT_NAME;Central;HG_NAME
+ADD;WIP_HOST;Testing host;127.0.0.1;general-clapi-template;Central;HG_NAME
+
+[HOSTTEMPLATE]
+ADD;general-clapi-template;general-clapi-template;;
+
+[HOSTGROUP]
+ADD;HG_NAME;HG_ALIAS
+
+[SERVICE]
+SPARAM;WIP_HOST;Load;notifications_enabled;1
